@@ -702,87 +702,168 @@ resources:
   # sorts.
   #
 
+  secgroup_kube_cluster:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      rules:
+# ICMP from PRIVATE_NET_CIDR, so that customers can ping or trace routes to their master and worker nodes
+        - protocol: icmp
+          remote_ip_prefix: {get_param: fixed_network_cidr}
+          remote_mode: 'remote_ip_prefix'
+# Pod network -> all TCP from CALICO_IPV4POOL_CIDR must be available to all of cluster
+        - protocol: tcp
+          remote_ip_prefix: {get_param: calico_ipv4pool}
+          remote_mode: 'remote_ip_prefix'
+# Pod network -> all UDP from CALICO_IPV4POOL_CIDR must be available to all of cluster
+        - protocol: udp
+          remote_ip_prefix: {get_param: calico_ipv4pool}
+          remote_mode: 'remote_ip_prefix'
+# Cluster IP network -> all TCP from CLUSTER_IP_CIDR must be available to all of cluster
+        - protocol: tcp
+          remote_ip_prefix: {get_param: portal_network_cidr}
+          remote_mode: 'remote_ip_prefix'
+# Cluster IP network -> all UDP from CLUSTER_IP_CIDR must be available to all of cluster
+        - protocol: udp
+          remote_ip_prefix: {get_param: portal_network_cidr}
+          remote_mode: 'remote_ip_prefix'
+# NodePort = Private NET
+# We allow customers to interact with NodePorts from their private network
+        - protocol: tcp
+          port_range_min: 30000
+          port_range_max: 32767
+          remote_ip_prefix: {get_param: fixed_network_cidr}
+          remote_mode: 'remote_ip_prefix'
+        - protocol: udp
+          port_range_min: 30000
+          port_range_max: 32767
+          remote_ip_prefix: {get_param: fixed_network_cidr}
+          remote_mode: 'remote_ip_prefix'
+
+# SSH from PRIVATE_NET_CIDR, so that customers can SSH to their cluster nodes - NOTE: in future we may want to remove it or limit to worker only
+# customers can add explicit rule if wider access required
+  secgroup_rule_kube_cluster_ssh:
+    type: OS::Neutron::SecurityGroupRule
+    properties:
+      protocol: tcp
+      port_range_min: 22
+      port_range_max: 22
+      security_group: {get_resource: secgroup_kube_cluster}
+      remote_group: {get_resource: secgroup_kube_cluster}
+
+# Felix HealthZ -> Remote group cluster wide - could be useful for customer specific monitoring
+  secgroup_rule_kube_cluster_felix_healthz:
+    type: OS::Neutron::SecurityGroupRule
+    properties:
+      protocol: tcp
+      port_range_min: 9099
+      port_range_max: 9099
+      security_group: {get_resource: secgroup_kube_cluster}
+      remote_group: {get_resource: secgroup_kube_cluster}
+
+# Prometheus node exporter in each node providing metrics -> remote group cluster wide
+# runs in privileged mode so appears in host namespace
+  secgroup_rule_kube_cluster_node_exporter:
+    type: OS::Neutron::SecurityGroupRule
+    properties:
+      protocol: tcp
+      port_range_min: 9100
+      port_range_max: 9100
+      security_group: {get_resource: secgroup_kube_cluster}
+      remote_group: {get_resource: secgroup_kube_cluster}
+
+# Kubelet API (not HealthZ) -> remote group cluster wide - used for communicaiton in the control plane
+  secgroup_rule_kube_cluster_kubelet_api_healthz:
+    type: OS::Neutron::SecurityGroupRule
+    properties:
+      protocol: tcp
+      port_range_min: 10250
+      port_range_max: 10250
+      security_group: {get_resource: secgroup_kube_cluster}
+      remote_group: {get_resource: secgroup_kube_cluster}
+
+# kube proxy healthz -> remote group cluster wide - could be used for independent health checking
+  secgroup_rule_kube_cluster_kube_proxy_healthz:
+    type: OS::Neutron::SecurityGroupRule
+    properties:
+      protocol: tcp
+      port_range_min: 10256
+      port_range_max: 10256
+      security_group: {get_resource: secgroup_kube_cluster}
+      remote_group: {get_resource: secgroup_kube_cluster}
+
+# Calico BIRD BGP mesh -> remote group cluster wide - communicates route updates for POD CIDR
+  secgroup_rule_kube_cluster_calico_bird_bgp:
+    type: OS::Neutron::SecurityGroupRule
+    properties:
+      protocol: tcp
+      port_range_min: 179
+      port_range_max: 179
+      security_group: {get_resource: secgroup_kube_cluster}
+      remote_group: {get_resource: secgroup_kube_cluster}
+
   secgroup_kube_master:
     type: OS::Neutron::SecurityGroup
     properties:
       rules:
-        - protocol: icmp
-        - protocol: tcp
-          port_range_min: 22
-          port_range_max: 22
-        - protocol: tcp
-          port_range_min: 7080
-          port_range_max: 7080
-        - protocol: tcp
-          port_range_min: 8080
-          port_range_max: 8080
-        - protocol: tcp
-          port_range_min: 2379
-          port_range_max: 2379
+# etcd replication needs to be visible to master nodes -> from group master-ID
         - protocol: tcp
           port_range_min: 2380
           port_range_max: 2380
+          remote_mode: 'remote_group_id'
+          remote_group_id: {get_resource: secgroup_kube_cluster}
+# etcd client all of cluster -> from PRIVATE_NET_CIDR (Currently CALICO is talking directly to etcd, but it will be changed in the future to talk to KubeAPI. When this happens, then this rule can be changed to from master-group)
+# PRIVATE_NET_CIDR is required so that kubelets can talk to etcd
+        - protocol: tcp
+          port_range_min: 2379
+          port_range_max: 2379
+          remote_ip_prefix: {get_param: fixed_network_cidr}
+          remote_mode: 'remote_ip_prefix'
+# Scheduler HealthZ (deprecated but still active) -> remote group cluster wide
+# We are working under the assumption that the APIs bind to these ports to provide HealtZ infomation only, and NOT other direct operations (bypassing the Kube API)
+        - protocol: tcp
+          port_range_min: 10251
+          port_range_max: 10251
+          remote_mode: 'remote_group_id'
+          remote_group_id: {get_resource: secgroup_kube_cluster}
+# controller manager healthz from remote group cluster wide
+        - protocol: tcp
+          port_range_min: 10252
+          port_range_max: 10252
+          remote_mode: 'remote_group_id'
+          remote_group_id: {get_resource: secgroup_kube_cluster}
+# openstack cloud controller from remote group cluster wide
+        - protocol: tcp
+          port_range_min: 10253
+          port_range_max: 10253
+          remote_mode: 'remote_group_id'
+          remote_group_id: {get_resource: secgroup_kube_cluster}
+# k8s public API from PRIVATE_NET_CIDR
         - protocol: tcp
           port_range_min: 6443
           port_range_max: 6443
-        - protocol: tcp
-          port_range_min: 9100
-          port_range_max: 9100
-        - protocol: tcp
-          port_range_min: 10250
-          port_range_max: 10250
-        - protocol: tcp
-          port_range_min: 30000
-          port_range_max: 32767
-        - protocol: udp
-          port_range_min: 8472
-          port_range_max: 8472
+          remote_ip_prefix: {get_param: fixed_network_cidr}
+          remote_mode: 'remote_ip_prefix'
 
   secgroup_kube_minion:
     type: OS::Neutron::SecurityGroup
     properties:
       rules:
-        - protocol: icmp
-        # Default port range for external service ports.
-        # In future, if the option `manage-security-groups` for ccm works
-        # well, we could remove this rule here.
-        # The PR in ccm is
-        # https://github.com/kubernetes/cloud-provider-openstack/pull/491
+# Kube Proxy
+# Allow cloud users to use the kubeproxy from -> remote group cluster wide
+# Note: when customers want to use kubeproxy, they connect to the master API port (6443) and the API proxies the connection to the appropriate node on port 8443 (internal to the cluster)
         - protocol: tcp
-          port_range_min: 22
-          port_range_max: 22
-        - protocol: tcp
-          port_range_min: 30000
-          port_range_max: 32767
-        # allow any traffic from master nodes
-        - protocol: tcp
-          port_range_min: 1
-          port_range_max: 65535
+          port_range_min: 8443
+          port_range_max: 8443
           remote_mode: 'remote_group_id'
-          remote_group_id: {get_resource: secgroup_kube_master}
-        - protocol: udp
-          port_range_min: 1
-          port_range_max: 65535
-          remote_mode: 'remote_group_id'
-          remote_group_id: {get_resource: secgroup_kube_master}
+          remote_group_id: {get_resource: secgroup_kube_cluster}
 
-  # allow any traffic between worker nodes
-  secgroup_rule_tcp_kube_minion:
-    type: OS::Neutron::SecurityGroupRule
-    properties:
-      protocol: tcp
-      port_range_min: 1
-      port_range_max: 65535
-      security_group: {get_resource: secgroup_kube_minion}
-      remote_group: {get_resource: secgroup_kube_minion}
-  secgroup_rule_udp_kube_minion:
-    type: OS::Neutron::SecurityGroupRule
-    properties:
-      protocol: udp
-      port_range_min: 1
-      port_range_max: 65535
-      security_group: {get_resource: secgroup_kube_minion}
-      remote_group: {get_resource: secgroup_kube_minion}
+          ##### ALL of cluster to workers
+        - protocol: tcp
+          remote_mode: 'remote_group_id'
+          remote_group_id: {get_resource: secgroup_kube_cluster}
+        - protocol: udp
+          remote_mode: 'remote_group_id'
+          remote_group_id: {get_resource: secgroup_kube_cluster}
 
   ######################################################################
   #
@@ -893,6 +974,7 @@ resources:
           influx_grafana_dashboard_enabled: {get_param: influx_grafana_dashboard_enabled}
           verify_ca: {get_param: verify_ca}
           secgroup_kube_master_id: {get_resource: secgroup_kube_master}
+          secgroup_kube_cluster_id: {get_resource: secgroup_kube_cluster}
           http_proxy: {get_param: http_proxy}
           https_proxy: {get_param: https_proxy}
           no_proxy: {get_param: no_proxy}
@@ -1065,6 +1147,7 @@ resources:
           tls_disabled: {get_param: tls_disabled}
           verify_ca: {get_param: verify_ca}
           secgroup_kube_minion_id: {get_resource: secgroup_kube_minion}
+          secgroup_kube_cluster_id: {get_resource: secgroup_kube_cluster}
           http_proxy: {get_param: http_proxy}
           https_proxy: {get_param: https_proxy}
           no_proxy: {get_param: no_proxy}

@@ -146,6 +146,10 @@ parameters:
     type: string
     description: ID of the security group for kubernetes minion.
 
+  secgroup_kube_cluster_id:
+    type: string
+    description: ID of the security group for kubernetes cluster wide.
+
   volume_driver:
     type: string
     description: volume driver to use for container storage
@@ -422,7 +426,8 @@ resources:
     properties:
       network: {get_param: fixed_network}
       security_groups:
-        - get_param: secgroup_kube_minion_id
+        - {get_param: secgroup_kube_minion_id}
+        - {get_param: secgroup_kube_cluster_id}
       fixed_ips:
         - subnet: {get_param: fixed_subnet}
       allowed_address_pairs:
